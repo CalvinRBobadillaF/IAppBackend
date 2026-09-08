@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .catalog import CATALOG, MODELS
+from .interpreter import MAX_INTERPRETER_BODY_BYTES, router as interpreter_router
 from .providers import TIMEOUT_SECONDS, ask_claude, ask_gemini, ask_openai, create_image, provider_error
 from .schemas import MAX_BODY_BYTES, ChatRequest, ChatResponse
 
@@ -39,11 +40,14 @@ class RequestLimitsMiddleware:
         if scope["method"] != "POST":
             return await self.app(scope, receive, no_cache_send)
         headers = dict(scope.get("headers", []))
+        interpreter_request = scope.get("path", "").startswith("/api/v1/interpreter/")
+        body_limit = MAX_INTERPRETER_BODY_BYTES if interpreter_request else MAX_BODY_BYTES
+        limit_message = "Interpreter request exceeds 128 KiB. Shorten the text or glossary." if interpreter_request else "Request exceeds 18 MiB. Remove attachments or start a new chat."
         declared = headers.get(b"content-length", b"")
         if declared:
             try:
-                if int(declared) > MAX_BODY_BYTES:
-                    return await JSONResponse(status_code=413, content={"detail": "Request exceeds 18 MiB. Remove attachments or start a new chat."})(scope, receive, no_cache_send)
+                if int(declared) > body_limit:
+                    return await JSONResponse(status_code=413, content={"detail": limit_message})(scope, receive, no_cache_send)
             except ValueError:
                 return await JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})(scope, receive, no_cache_send)
         chunks, size = [], 0
@@ -53,8 +57,8 @@ class RequestLimitsMiddleware:
                 return
             chunk = message.get("body", b"")
             size += len(chunk)
-            if size > MAX_BODY_BYTES:
-                return await JSONResponse(status_code=413, content={"detail": "Request exceeds 18 MiB. Remove attachments or start a new chat."})(scope, receive, no_cache_send)
+            if size > body_limit:
+                return await JSONResponse(status_code=413, content={"detail": limit_message})(scope, receive, no_cache_send)
             chunks.append(chunk)
             if not message.get("more_body", False):
                 break
@@ -71,7 +75,8 @@ class RequestLimitsMiddleware:
         await self.app(scope, replay, no_cache_send)
 
 
-app = FastAPI(title="IApp API", version="2.0.0")
+app = FastAPI(title="IApp API", version="2.1.0")
+app.include_router(interpreter_router)
 app.add_middleware(RequestLimitsMiddleware)
 app.add_middleware(
     CORSMiddleware, allow_origins=configured_origins(), allow_credentials=False,
