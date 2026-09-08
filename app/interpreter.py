@@ -102,21 +102,32 @@ def capabilities() -> dict:
     }
 
 
-def interpreter_error(error: Exception) -> HTTPException:
+def interpreter_error(error: Exception, provider: str | None = None, operation: str | None = None) -> HTTPException:
     status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+    # Use our own fixed labels/guidance, never upstream response bodies or an
+    # arbitrary provider value. The public capability flags only confirm that a
+    # key is nonempty; they cannot verify its permissions, plan, or restrictions.
+    label = {"deepgram": "Deepgram", "gladia": "Gladia", "deepl": "DeepL", "google": "Google Cloud Translation"}.get(provider, "The interpreter provider")
+    action = {"session": " while creating a transcription session", "translate": " while translating text"}.get(operation, "")
     if isinstance(error, (TimeoutError, httpx.TimeoutException)) or status in (408, 504):
-        return HTTPException(504, "The interpreter provider took too long. Please retry.")
+        return HTTPException(504, f"{label} took too long. Please retry.")
     if status in (401, 403):
-        return HTTPException(502, "The interpreter provider rejected the server credentials or permissions. Check its API key, billing, and permissions in Render.")
+        guidance = {
+            "deepgram": "Check DEEPGRAM_API_KEY in Render. Creating temporary tokens requires a Deepgram API key with Member or higher permissions.",
+            "gladia": "Check GLADIA_API_KEY in Render. Use an active Gladia API key and verify that its account has access to live transcription.",
+            "deepl": "Check DEEPL_API_KEY in Render: it must belong to a DeepL API subscription, not a consumer translator login. If DEEPL_API_URL is set, it must match the key's Free or Pro plan; Free keys end in :fx.",
+            "google": "Check GOOGLE_TRANSLATE_API_KEY in Render. Enable Cloud Translation API and billing in the key's Google Cloud project. Its restrictions must allow server requests; browser-referrer restrictions do not work here.",
+        }.get(provider, "Check the provider API key, billing, and permissions in Render.")
+        return HTTPException(502, f"{label} rejected the server credentials or permissions{action}. {guidance} Enter only the raw key value, without surrounding quotes or an Authorization prefix.")
     if status == 429:
-        return HTTPException(429, "The interpreter provider rate limit or account quota was reached. Wait or check billing.")
+        return HTTPException(429, f"{label} rate limit or account quota was reached. Wait or check billing.")
     if status in (402, 456):
-        return HTTPException(429, "The interpreter provider has insufficient credits or has reached its spending/character limit. Check the provider account's billing and limits before retrying.")
+        return HTTPException(429, f"{label} has insufficient credits or has reached its spending/character limit. Check the provider account's billing and limits before retrying.")
     if status in (400, 413, 422):
-        return HTTPException(422, "The interpreter provider rejected this request. Check the selected languages, audio format, or glossary.")
+        return HTTPException(422, f"{label} rejected this request. Check the selected languages, audio format, or glossary.")
     if isinstance(error, httpx.RequestError):
-        return HTTPException(502, "The server could not connect to the interpreter provider. Please retry.")
-    return HTTPException(502, "The interpreter provider could not complete the request. Please retry.")
+        return HTTPException(502, f"The server could not connect to {label}. Please retry.")
+    return HTTPException(502, f"{label} could not complete the request. Please retry.")
 
 
 async def bounded_request(operation: str, provider: str, callback):
@@ -134,7 +145,7 @@ async def bounded_request(operation: str, provider: str, callback):
         # Never log provider response bodies, credentials, URLs, glossary, or text.
         status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
         logger.warning("Interpreter failure request=%s operation=%s provider=%s error_type=%s upstream_status=%s", request_id, operation, provider, type(error).__name__, status)
-        mapped = interpreter_error(error)
+        mapped = interpreter_error(error, provider, operation)
         mapped.headers = {"X-Request-ID": request_id}
         raise mapped from None
     finally:
